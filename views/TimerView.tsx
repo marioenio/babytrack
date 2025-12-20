@@ -9,6 +9,8 @@ export const TimerView: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [startTime, setStartTime] = useState<string | null>(null);
+  const [accumulatedSeconds, setAccumulatedSeconds] = useState(0);
+  const [lastResumeTime, setLastResumeTime] = useState<number | null>(null);
   
   // State for the "Finish" modal
   const [showFinishModal, setShowFinishModal] = useState(false);
@@ -17,19 +19,49 @@ export const TimerView: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
 
   const intervalRef = useRef<number | null>(null);
+  const wakeLockRef = useRef<any>(null);
 
+  // --- Wake Lock Logic ---
+  const requestWakeLock = async () => {
+    if ('wakeLock' in navigator) {
+      try {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+      } catch (err) {
+        console.error(`${err.name}, ${err.message}`);
+      }
+    }
+  };
+
+  const releaseWakeLock = async () => {
+    if (wakeLockRef.current) {
+      await wakeLockRef.current.release();
+      wakeLockRef.current = null;
+    }
+  };
+
+  // Recover wake lock if tab becomes visible again
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (wakeLockRef.current !== null && document.visibilityState === 'visible' && isRunning) {
+        await requestWakeLock();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [isRunning]);
+
+  // Initial Load
   useEffect(() => {
     const savedState = getActiveTimer();
     if (savedState) {
       setStartTime(savedState.startTime);
+      setAccumulatedSeconds(savedState.accumulatedSeconds);
       
       if (savedState.isRunning && savedState.lastResumeTime) {
-        const now = new Date().getTime();
-        const lastResume = new Date(savedState.lastResumeTime).getTime();
-        const additionalSeconds = Math.floor((now - lastResume) / 1000);
-        
-        setSeconds(savedState.accumulatedSeconds + additionalSeconds);
+        const resumeTime = new Date(savedState.lastResumeTime).getTime();
+        setLastResumeTime(resumeTime);
         setIsRunning(true);
+        requestWakeLock();
       } else {
         setSeconds(savedState.accumulatedSeconds);
         setIsRunning(false);
@@ -37,23 +69,13 @@ export const TimerView: React.FC = () => {
     }
   }, []);
 
+  // Update logic to calculate real time difference
   useEffect(() => {
-    if (startTime) {
-      saveActiveTimer({
-        isRunning,
-        startTime,
-        accumulatedSeconds: seconds,
-        lastResumeTime: isRunning ? new Date().toISOString() : null
-      });
-    } else {
-      clearActiveTimer();
-    }
-  }, [isRunning, seconds, startTime]);
-
-  useEffect(() => {
-    if (isRunning) {
+    if (isRunning && lastResumeTime) {
       intervalRef.current = window.setInterval(() => {
-        setSeconds((s) => s + 1);
+        const now = Date.now();
+        const diff = Math.floor((now - lastResumeTime) / 1000);
+        setSeconds(accumulatedSeconds + diff);
       }, 1000);
     } else {
       if (intervalRef.current) {
@@ -63,22 +85,43 @@ export const TimerView: React.FC = () => {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [isRunning]);
+  }, [isRunning, lastResumeTime, accumulatedSeconds]);
+
+  // Persistence
+  useEffect(() => {
+    if (startTime) {
+      saveActiveTimer({
+        isRunning,
+        startTime,
+        accumulatedSeconds: isRunning ? accumulatedSeconds : seconds,
+        lastResumeTime: isRunning ? new Date(lastResumeTime!).toISOString() : null
+      });
+    } else {
+      clearActiveTimer();
+    }
+  }, [isRunning, seconds, startTime, accumulatedSeconds, lastResumeTime]);
 
   const handleStart = () => {
+    const now = Date.now();
     if (!startTime) {
       setStartTime(new Date().toISOString());
     }
+    setLastResumeTime(now);
     setIsRunning(true);
+    requestWakeLock();
   };
 
   const handlePause = () => {
+    setAccumulatedSeconds(seconds);
     setIsRunning(false);
+    releaseWakeLock();
   };
 
   const handleFinishClick = () => {
+    setAccumulatedSeconds(seconds);
     setIsRunning(false);
     setShowFinishModal(true);
+    releaseWakeLock();
   };
 
   const handleSaveSession = async () => {
@@ -93,16 +136,19 @@ export const TimerView: React.FC = () => {
           hasPoop,
         });
         
-        // Reset Everything on success
+        // Reset Everything
         setSeconds(0);
+        setAccumulatedSeconds(0);
         setIsRunning(false);
         setStartTime(null);
+        setLastResumeTime(null);
         setHasPee(false);
         setHasPoop(false);
         setShowFinishModal(false);
         clearActiveTimer();
+        releaseWakeLock();
       } catch (e) {
-        alert("Erro ao salvar mamada. Verifique sua conexão.");
+        alert("Erro ao salvar mamada localmente.");
       } finally {
         setIsSaving(false);
       }
@@ -224,6 +270,12 @@ export const TimerView: React.FC = () => {
           </div>
         )}
       </div>
+      
+      {isRunning && (
+        <p className="text-[10px] text-gray-400 animate-pulse uppercase tracking-widest font-bold">
+          Tela mantida acesa automaticamente
+        </p>
+      )}
     </div>
   );
 };
